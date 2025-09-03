@@ -1,45 +1,44 @@
-# -*- coding: utf-8 -*-
-"""
-handlers/keyboards.py — модуль з клавіатурами для бота.
-Повністю перероблено для розділення меню клієнта та менеджера.
-"""
-from telegram import ReplyKeyboardMarkup
-import config
+from telegram import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 
-# --- НОВЕ КЛІЄНТСЬКЕ МЕНЮ ---
-client_keyboard: ReplyKeyboardMarkup = ReplyKeyboardMarkup(
-    [
-        ["🚗 Каталог авто в наявності"],
-        ["🧮 Калькулятор авто із США"],
-        ["📝 Підбір авто (заявка)"],
-        ["📞 Зв'язатися з нами"]
-    ],
-    resize_keyboard=True,
-)
+# --- ОСНОВНА КЛАВІАТУРА (REPLY KEYBOARD) ---
 
-# --- УНІВЕРСАЛЬНІ КЛАВІАТУРИ ---
-yes_no_keyboard: ReplyKeyboardMarkup = ReplyKeyboardMarkup(
-    [["Так", "Ні"]], resize_keyboard=True, one_time_keyboard=True
-)
-
-auction_choice_keyboard: ReplyKeyboardMarkup = ReplyKeyboardMarkup(
-    [["Copart", "IAAI"]], resize_keyboard=True, one_time_keyboard=True
-)
-
-
-# --- НОВЕ МЕНЮ СПІВРОБІТНИКА ---
-def get_employee_keyboard(user_id: int) -> ReplyKeyboardMarkup:
+def get_main_menu_keyboard(is_manager: bool = False):
     """
-    Повертає клавіатуру для співробітника.
-    Власник бачить додаткові кнопки.
+    Створює та повертає розмітку клавіатури головного меню.
+    Якщо is_manager=True, додає кнопку доступу до адмін-панелі.
     """
-    keyboard_layout = [
-        ["➕ Додати авто / 📢 Пост", "📊 Фінанси / Угоди"],
-        ["🚀 Auto.RIA", "📋 Мої нотатки"],
-        ["📈 Статистика", "🔍 Пошук по базі"],
+    # Спільні кнопки для всіх користувачів
+    keyboard = [
+        [KeyboardButton("🚗 Каталог Авто"), KeyboardButton("💰 Калькулятор")],
+        [KeyboardButton(" аукціони"), KeyboardButton("👤 Мій кабінет")],
+        [KeyboardButton("📞 Зв'язатися з менеджером")]
     ]
-    # Якщо це власник, можна додати спец. кнопки
-    # if user_id == config.OWNER_ID:
-    #     keyboard_layout.append(["👑 Панель власника"])
+    
+    # Якщо користувач є менеджером, додаємо йому кнопку адмін-панелі
+    if is_manager:
+        admin_button = [KeyboardButton("🔐 Адмін-панель")]
+        # Вставляємо адмін-кнопку першим рядом для пріоритету
+        keyboard.insert(0, admin_button)
+            
+    return ReplyKeyboardMarkup(
+        keyboard,
+        resize_keyboard=True,
+        one_time_keyboard=False
+    )
 
-    return ReplyKeyboardMarkup(keyboard_layout, resize_keyboard=True)
+
+# --- ВБУДОВАНІ КЛАВІАТУРИ (INLINE KEYBOARDS) ---
+
+def get_admin_panel_keyboard():
+    """
+    Створює та повертає клавіатуру для адмін-панелі.
+    """
+    keyboard = [
+        [InlineKeyboardButton("➕ Додати авто", callback_data="admin_add_car")],
+        [InlineKeyboardButton("✏️ Редагувати авто", callback_data="admin_edit_car")],
+        [InlineKeyboardButton("🏁 Позначити як продане", callback_data="admin_mark_sold")],
+        [InlineKeyboardButton("💰 Керування фінансами", callback_data="admin_finance_menu")],
+        [InlineKeyboardButton("📊 Статистика", callback_data="admin_stats")],
+    ]
+    return InlineKeyboardMarkup(keyboard)
+

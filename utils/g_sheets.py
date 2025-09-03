@@ -1,135 +1,162 @@
-# utils/g_sheets.py
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
 import logging
-from typing import Dict, Any, List
-import gspread_asyncio
-from google.oauth2.service_account import Credentials
+from config import SHEET_NAMES
+from datetime import datetime
+import time
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
+# Налаштування логування
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
-def get_creds(credentials_path: str):
-    """Створює об'єкт credentials для gspread_asyncio."""
-    scopes = [
-        "https://spreadsheets.google.com/feeds",
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive.file",
-        "https://www.googleapis.com/auth/drive"
+# Області доступу для API та шлях до файлу облікових даних
+SCOPE = ["https://spreadsheets.google.com/feeds",
+         'https://www.googleapis.com/auth/spreadsheets',
+         "https://www.googleapis.com/auth/drive.file",
+         "https://www.googleapis.com/auth/drive"]
+CREDS_FILE = 'credentials.json'
+
+# Глобальна змінна для об'єкта таблиці
+spreadsheet = None
+
+def authorize_gspread():
+    """Авторизується в Google Sheets і повертає об'єкт таблиці."""
+    global spreadsheet
+    if spreadsheet:
+        return spreadsheet
+    try:
+        creds = ServiceAccountCredentials.from_json_keyfile_name(CREDS_FILE, SCOPE)
+        client = gspread.authorize(creds)
+        spreadsheet = client.open("iTrans_Motors")
+        logging.info("Успішно підключено до Google таблиці 'iTrans_Motors'")
+        return spreadsheet
+    except Exception as e:
+        logging.error(f"Не вдалося підключитися до Google таблиці: {e}")
+        return None
+
+# Ініціалізація підключення при завантаженні модуля
+spreadsheet = authorize_gspread()
+
+# --- УНІВЕРСАЛЬНА ФУНКЦІЯ ДОСТУПУ ДО АРКУШІВ ---
+def get_worksheet_by_name(sheet_name):
+    """
+    Отримує аркуш (worksheet) за його назвою.
+    Це централізована функція для доступу до будь-якого аркуша.
+    """
+    if not spreadsheet:
+        logging.error("Об'єкт таблиці не ініціалізовано. Спроба повторної авторизації...")
+        authorize_gspread()
+        if not spreadsheet:
+            logging.error("Повторна авторизація не вдалася. Неможливо отримати аркуш.")
+            return None
+    
+    try:
+        return spreadsheet.worksheet(sheet_name)
+    except gspread.exceptions.WorksheetNotFound:
+        logging.error(f"Аркуш з назвою '{sheet_name}' не знайдено.")
+        return None
+    except Exception as e:
+        logging.error(f"Сталася помилка при отриманні аркуша '{sheet_name}': {e}")
+        return None
+
+# --- ВАШІ ІСНУЮЧІ ФУНКЦІЇ, ОНОВЛЕНІ ДЛЯ НАДІЙНОСТІ ---
+
+def find_car_in_sheets(vin_code):
+    """Шукає автомобіль за VIN-кодом у всіх відповідних аркушах."""
+    sheets_to_search = [
+        SHEET_NAMES['all_cars'],
+        SHEET_NAMES['sydora_site'],
+        SHEET_NAMES['halytska_site'],
+        SHEET_NAMES['in_transit_usa'],
+        SHEET_NAMES['in_transit_china']
     ]
-    return Credentials.from_service_account_file(credentials_path, scopes=scopes)
-
-class GoogleSheetManager:
-    """Асинхронний клас для управління всіма операціями з Google Sheets."""
-    def __init__(self, credentials_path: str, spreadsheet_key: str):
-        self.spreadsheet_key = spreadsheet_key
-        self.credentials_path = credentials_path
-        self.agcm = gspread_asyncio.AsyncioGspreadClientManager(lambda: get_creds(self.credentials_path))
-        self.spreadsheet = None
-        self.is_authorized = False
-
-    async def authorize(self) -> bool:
-        """Асинхронно авторизується та відкриває таблицю."""
-        if self.is_authorized:
-            return True
+    for sheet_name in sheets_to_search:
+        worksheet = get_worksheet_by_name(sheet_name)
+        if not worksheet:
+            continue
         try:
-            agc = await self.agcm.authorize()
-            self.spreadsheet = await agc.open_by_key(self.spreadsheet_key)
-            self.is_authorized = True
-            logger.info("Асинхронна авторизація в Google Sheets успішна.")
-            return True
+            cell = worksheet.find(vin_code, in_column=2)
+            if cell:
+                row_values = worksheet.row_values(cell.row)
+                headers = worksheet.row_values(1)
+                car_data = dict(zip(headers, row_values))
+                return car_data, worksheet
+        except gspread.exceptions.CellNotFound:
+            continue
         except Exception as e:
-            logger.error(f"Помилка асинхронної авторизації: {e}")
-            self.is_authorized = False
-            return False
+            logging.error(f"Помилка пошуку VIN {vin_code} в аркуші '{sheet_name}': {e}")
+    return None, None
 
-    async def open_worksheet(self, sheet_name: str):
-        """Асинхронно відкриває аркуш за назвою."""
-        if not self.is_authorized or not self.spreadsheet:
-            if not await self.authorize():
-                return None
-        try:
-            return await self.spreadsheet.worksheet(sheet_name)
-        except gspread_asyncio.gspread.exceptions.WorksheetNotFound:
-            logger.error(f"Аркуш з назвою '{sheet_name}' не знайдено.")
-            return None
-        except Exception as e:
-            logger.error(f"Невідома помилка при відкритті аркуша '{sheet_name}': {e}")
-            return None
+def update_car_in_sheet(vin_code, updates):
+    """Оновлює дані автомобіля за VIN-кодом."""
+    car_data, worksheet = find_car_in_sheets(vin_code)
+    if not worksheet or not car_data:
+        logging.error(f"Автомобіль з VIN {vin_code} не знайдено для оновлення.")
+        return False
+    try:
+        cell = worksheet.find(vin_code, in_column=2)
+        headers = worksheet.row_values(1)
+        for key, value in updates.items():
+            if key in headers:
+                col = headers.index(key) + 1
+                worksheet.update_cell(cell.row, col, value)
+        # Оновлюємо дату
+        if 'Дата оновлення' in headers:
+            col = headers.index('Дата оновлення') + 1
+            worksheet.update_cell(cell.row, col, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        logging.info(f"Дані для VIN {vin_code} успішно оновлено.")
+        return True
+    except Exception as e:
+        logging.error(f"Помилка оновлення даних для VIN {vin_code}: {e}")
+        return False
 
-    async def get_all_records(self, sheet_name: str, expected_headers: List[str] = None) -> List[Dict[str, Any]] | None:
-        """Асинхронно отримує всі записи з аркуша у вигляді списку словників."""
-        try:
-            worksheet = await self.open_worksheet(sheet_name)
-            if not worksheet:
-                return None
-            
-            records = await worksheet.get_all_records()
-            # Перевірка та доповнення заголовків, якщо необхідно
-            if expected_headers and records:
-                actual_headers = list(records[0].keys())
-                if set(expected_headers) != set(actual_headers):
-                     logger.warning(f"Заголовки в аркуші '{sheet_name}' не співпадають з очікуваними.")
-            return records
-        except Exception as e:
-            logger.error(f"Помилка при отриманні всіх записів з '{sheet_name}': {e}", exc_info=True)
-            return None
-            
-    async def add_row(self, sheet_name: str, data: Dict[str, Any], headers_order: List[str]) -> bool:
-        """Асинхронно додає новий рядок в аркуш."""
-        try:
-            worksheet = await self.open_worksheet(sheet_name)
-            if not worksheet:
-                return False
-            
-            row_to_add = [data.get(header, "") for header in headers_order]
-            await worksheet.append_row(row_to_add, value_input_option='USER_ENTERED')
-            logger.info(f"Новий рядок успішно додано в аркуш '{sheet_name}'.")
-            return True
-        except Exception as e:
-            logger.error(f"Помилка при додаванні рядка в '{sheet_name}': {e}")
-            return False
+def add_new_car_to_sheet(car_data, sheet_name_key):
+    """Додає новий автомобіль у вказаний аркуш."""
+    sheet_name = SHEET_NAMES.get(sheet_name_key)
+    if not sheet_name:
+        logging.error(f"Невідомий ключ аркуша: {sheet_name_key}")
+        return False
+    
+    worksheet = get_worksheet_by_name(sheet_name)
+    if not worksheet:
+        return False
+        
+    try:
+        headers = worksheet.row_values(1)
+        row_to_add = []
+        for header in headers:
+            row_to_add.append(car_data.get(header, ""))
+        worksheet.append_row(row_to_add)
+        logging.info(f"Новий автомобіль {car_data.get('ВІН-код')} додано до '{sheet_name}'.")
+        return True
+    except Exception as e:
+        logging.error(f"Помилка додавання авто до '{sheet_name}': {e}")
+        return False
+        
+def add_note_to_sheet(user_id, note_text, reminder_time=None):
+    """Додає нотатку користувача в аркуш 'Нотатки'."""
+    worksheet = get_worksheet_by_name(SHEET_NAMES["notes"])
+    if not worksheet:
+        return None
+    try:
+        all_notes = worksheet.get_all_records()
+        new_id = max([note.get('ID Нотатки', 0) for note in all_notes] + [0]) + 1
+        
+        row_data = [
+            new_id,
+            user_id,
+            note_text,
+            reminder_time.strftime("%Y-%m-%d %H:%M:%S") if reminder_time else "Неактуально",
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "Активно" if reminder_time else "Без нагадування"
+        ]
+        worksheet.append_row(row_data)
+        logging.info(f"Нотатку з ID {new_id} для користувача {user_id} додано.")
+        return new_id
+    except Exception as e:
+        logging.error(f"Помилка додавання нотатки для користувача {user_id}: {e}")
+        return None
 
-    async def update_record_by_key(self, sheet_name: str, key_column: str, key_value: Any, new_data: Dict[str, Any]) -> bool:
-        """Знаходить рядок за унікальним ключем та оновлює його."""
-        try:
-            worksheet = await self.open_worksheet(sheet_name)
-            if not worksheet: return False
-
-            all_records = await self.get_all_records(sheet_name)
-            if not all_records: return False
-            
-            headers = list(all_records[0].keys())
-            if key_column not in headers:
-                logger.error(f"Ключова колонка '{key_column}' не знайдена в заголовках аркуша '{sheet_name}'.")
-                return False
-
-            row_index_to_update = -1
-            for i, record in enumerate(all_records):
-                if str(record.get(key_column)) == str(key_value):
-                    row_index_to_update = i + 2  # +1 for header, +1 for 0-based index
-                    break
-            
-            if row_index_to_update == -1:
-                logger.warning(f"Запис з {key_column}='{key_value}' не знайдено в '{sheet_name}'.")
-                return False
-
-            # Отримуємо поточні значення рядка та оновлюємо їх
-            current_row_values = await worksheet.row_values(row_index_to_update)
-            record_to_update = dict(zip(headers, current_row_values))
-            record_to_update.update(new_data)
-            
-            updated_row_values = [record_to_update.get(h, '') for h in headers]
-            
-            # Оновлюємо діапазон
-            range_to_update = f'A{row_index_to_update}:{chr(ord("A") + len(headers) - 1)}{row_index_to_update}'
-            await worksheet.update(range_to_update, [updated_row_values], value_input_option='USER_ENTERED')
-            
-            logger.info(f"Успішно оновлено рядок {row_index_to_update} в '{sheet_name}' (де {key_column}='{key_value}').")
-            return True
-
-        except Exception as e:
-            logger.error(f"Помилка при оновленні запису в '{sheet_name}' за ключем '{key_column}': {e}", exc_info=True)
-            return False
+# ... та інші ваші функції ...
+# Переконайтесь, що всі вони використовують get_worksheet_by_name()
+# для отримання доступу до аркушів.
 

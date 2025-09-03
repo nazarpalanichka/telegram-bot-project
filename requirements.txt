@@ -1,0 +1,8 @@
+python-telegram-bot[ext]
+gspread
+google-auth-oauthlib
+google-auth-httplib2
+thefuzz
+requests
+pandas
+gspread-dataframe
